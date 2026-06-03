@@ -168,7 +168,8 @@ setup_tools() {
     wget -q -O /root/protos/app/stats/config.proto "${REPO_URL}/protos/app/stats/config.proto"
     wget -q -O /root/protos/app/stats/command/command.proto "${REPO_URL}/protos/app/stats/command/command.proto"
     wget -q -O /root/protos/common/serial/typed_message.proto "${REPO_URL}/protos/common/serial/typed_message.proto"    
-
+    mkdir -p /root/api
+    wget -q -O /root/api/package.json "${REPO_URL}/package.json"
 }
 
 # --- [ EKSEKUSI UTAMA ] ---
