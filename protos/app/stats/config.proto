@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package v2ray.core.app.stats;
+option csharp_namespace = "V2Ray.Core.App.Stats";
+option go_package = "github.com/v2fly/v2ray-core/v4/app/stats";
+option java_package = "com.v2ray.core.app.stats";
+option java_multiple_files = true;
+
+// Config is the configuration for StatsService.
+message Config {
+}
+
+message ChannelConfig {
+}
