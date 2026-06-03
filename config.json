@@ -45,6 +45,19 @@
     },
     {
       "type": "vmess",
+      "tag": "vmess-in",
+      "listen": "::",
+      "listen_port": 10001,
+      "users": [],  
+      "transport": {
+        "type": "ws",
+        "path": "/vmess",
+        "max_early_data": 2048,
+        "early_data_header_name": "Sec-WebSocket-Protocol"
+      }
+    },
+    {
+      "type": "vmess",
       "tag": "vmessgrpc-in",
       "listen": "::",
       "listen_port": 20001,
