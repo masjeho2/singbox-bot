@@ -142,16 +142,19 @@ END
     sysctl -p > /dev/null 2>&1
 }
 
-finalize_installation() {
-    log_message "INFO" "Menyelesaikan instalasi dan merestart layanan..."
-    systemctl daemon-reload
-    systemctl restart haproxy
-    systemctl restart sing-box.service
-    
-    local total_secs="$(($(date +%s) - start_time))"
-    local mins=$((total_secs / 60))
-    local secs=$((total_secs % 60))
-    log_message "INFO" "Instalasi selesai dalam ${mins} menit ${secs} detik!"
+install_nodejs() {
+    # Cek apakah Node.js sudah terinstal menggunakan command -v
+    if ! command -v node >/dev/null 2>&1; then
+        log_message "INFO" "Node.js belum terinstal. Menginstal Node.js..."
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
+        \. "$HOME/.nvm/nvm.sh"
+        nvm install 24
+        npm -v
+        log_message "INFO" "Node.js berhasil diinstal."
+    else
+        # Hanya dieksekusi jika Node.js sedari awal sudah ada
+        log_message "INFO" "Node.js sudah terinstal."
+    fi
 }
 
 setup_tools() {
@@ -172,6 +175,18 @@ setup_tools() {
     wget -q -O /root/api/package.json "${REPO_URL}/package.json"
 }
 
+finalize_installation() {
+    log_message "INFO" "Menyelesaikan instalasi dan merestart layanan..."
+    systemctl daemon-reload
+    systemctl restart haproxy
+    systemctl restart sing-box.service
+    
+    local total_secs="$(($(date +%s) - start_time))"
+    local mins=$((total_secs / 60))
+    local secs=$((total_secs % 60))
+    log_message "INFO" "Instalasi selesai dalam ${mins} menit ${secs} detik!"
+}
+
 # --- [ EKSEKUSI UTAMA ] ---
 main() {
     clear
@@ -189,8 +204,10 @@ main() {
     configure_domain_and_ssl
     download_configurations
     tune_system_performance
-    finalize_installation
+    install_nodejs
     setup_tools
+    finalize_installation
+    
 
     echo ""
     read -rp $'\e[33;1m[ INFO ]\e[0m \e[37;1mApakah Anda ingin me-reboot VPS sekarang? (Y/N): \e[0m' answer
