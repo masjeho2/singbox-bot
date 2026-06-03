@@ -1,0 +1,148 @@
+{
+  "log": {
+    "disabled": false,
+    "level": "info",
+    "output": "/var/log/sing-box/access.log",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "dns-local",
+        "detour": "direct"
+      },
+      {
+        "type": "tcp",
+        "tag": "google-tcp",
+        "server": "8.8.8.8",
+        "server_port": 53
+      },
+      {
+        "type": "udp",
+        "tag": "google-udp",
+        "server": "8.8.8.8",
+        "server_port": 53
+      }
+    ],
+    "strategy": "prefer_ipv4",
+    "disable_cache": false,
+    "disable_expire": false
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "::",
+      "listen_port": 1080,
+      "users": [],
+      "transport": {
+        "type": "ws",
+        "path": "/vmess",
+        "max_early_data": 2048,
+        "early_data_header_name": "Sec-WebSocket-Protocol"
+      }
+    },
+    {
+      "type": "vmess",
+      "tag": "vmessgrpc-in",
+      "listen": "::",
+      "listen_port": 20001,
+      "users": [],
+      "transport": {
+        "type": "grpc",
+        "service_name": "vmess-grpc",
+        "permit_without_stream": false
+      }
+    },
+    {
+      "type": "trojan",
+      "tag": "trojan-in",
+      "listen": "::",
+      "listen_port": 10003,
+      "users": [],
+      "transport": {
+        "type": "ws",
+        "path": "/trojan-ws"
+      }
+    },
+    {
+      "type": "trojan",
+      "tag": "trojangrpc-in",
+      "listen": "::",
+      "listen_port": 20003,
+      "users": [],
+      "transport": {
+        "type": "grpc",
+        "service_name": "trojan-grpc",
+        "permit_without_stream": false
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": 10002,
+      "users": [],
+      "transport": {
+        "type": "ws",
+        "path": "/vless-ws"
+      }
+    },
+    {
+      "type": "vless",
+      "tag": "vlessgrpc-in",
+      "listen": "::",
+      "listen_port": 20002,
+      "users": [],
+      "transport": {
+        "type": "grpc",
+        "service_name": "vless-grpc",
+        "permit_without_stream": false
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "domain": "pagead2.googlesyndication.com",
+        "action": "route-options",
+        "override_address": "1.1.1.1",
+        "override_port": 443
+      }
+    ],
+    "default_domain_resolver": "dns-local",
+    "final": "direct",
+    "auto_detect_interface": true
+  },
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:8080",
+      "stats": {
+        "enabled": true,
+        "inbounds": [
+          "vmess-in",
+          "vmessgrpc-in",
+          "trojan-in",
+          "trojangrpc-in",
+          "vless-in",
+          "vlessgrpc-in"
+        ],
+        "outbounds": [
+          "direct"
+        ],
+        "users": []
+      }
+    }
+  }
+}
