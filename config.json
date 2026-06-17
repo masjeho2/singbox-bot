@@ -9,8 +9,8 @@
     "servers": [
       {
         "type": "local",
-        "tag": "dns-local",
-        "detour": "direct"
+        "tag": "dns-local"
+        
       },
       {
         "type": "tcp",
@@ -122,7 +122,7 @@
         "override_port": 443
       }
     ],
-    "default_domain_resolver": "dns-local",
+    "default_domain_resolver": "google-udp",
     "final": "direct",
     "auto_detect_interface": true
   },
