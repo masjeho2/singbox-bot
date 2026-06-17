@@ -1,6 +1,12 @@
 # =================================================================
 # Skrip Instalasi Server sing-box & HAProxy
 # Sumber Bahan: https://github.com/masjeho2/singbox-bot
+#
+# DIPERBARUI: Menambahkan instalasi grpcurl.
+# Tanpa grpcurl, bot Telegram (xray-singbox-monggodb) TIDAK BISA
+# membaca statistik traffic per-user dari Sing-box — akibatnya
+# sistem kuota akan selalu terbaca 0 Bytes meski user sudah
+# memakai traffic, dan auto-expired-by-quota tidak akan jalan.
 # =================================================================
 
 set -e
@@ -14,6 +20,10 @@ WB='\e[37;1m'
 
 # URL Raw dari repositori GitHub Anda
 REPO_URL="https://raw.githubusercontent.com/masjeho2/singbox-bot/main"
+
+# Versi grpcurl yang dipasang (cek rilis terbaru di
+# https://github.com/fullstorydev/grpcurl/releases jika perlu update)
+GRPCURL_VERSION="1.9.1"
 
 start_time=$(date +%s)
 
@@ -43,7 +53,7 @@ update_system() {
 
 install_dependencies() {
     log_message "INFO" "Menginstal dependensi yang dibutuhkan..."
-    local pkgs=(socat curl wget screen cron netfilter-persistent vnstat fail2ban sysstat jq gnupg software-properties-common)
+    local pkgs=(socat curl wget screen cron netfilter-persistent vnstat fail2ban sysstat jq gnupg software-properties-common tar)
     for pkg in "${pkgs[@]}"; do
         if ! is_pkg_installed "$pkg"; then
             apt-get install -y "$pkg"
@@ -77,6 +87,54 @@ download_and_setup_singbox() {
         log_message "INFO" "Mengunduh GeoIP & GeoSite rules..."
         curl -L -o /usr/local/share/sing-box/geoip.dat https://github.com/malikshi/v2ray-rules-dat/releases/latest/download/geoip.dat
         curl -L -o /usr/local/share/sing-box/geosite.dat https://github.com/malikshi/v2ray-rules-dat/releases/latest/download/geosite.dat
+    fi
+}
+
+install_grpcurl() {
+    # FIX KRITIS: grpcurl WAJIB ada agar bot bisa query traffic stats
+    # Sing-box lewat V2Ray API (gRPC). Tanpa ini, sistem kuota tidak
+    # akan pernah berfungsi — kuota akan selalu terbaca 0 Bytes.
+    if is_cmd_installed "grpcurl"; then
+        log_message "INFO" "grpcurl sudah terinstal, dilewati."
+        return 0
+    fi
+
+    log_message "INFO" "Menginstal grpcurl v${GRPCURL_VERSION} (dibutuhkan untuk tracking kuota)..."
+
+    local arch
+    case "$(uname -m)" in
+        x86_64)  arch="x86_64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armv7" ;;
+        *)
+            log_message "WARN" "Arsitektur $(uname -m) tidak dikenal, mencoba x86_64..."
+            arch="x86_64"
+            ;;
+    esac
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    local tarball="grpcurl_${GRPCURL_VERSION}_linux_${arch}.tar.gz"
+    local download_url="https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/${tarball}"
+
+    if curl -fsSL -o "${tmp_dir}/${tarball}" "${download_url}"; then
+        tar -xzf "${tmp_dir}/${tarball}" -C "${tmp_dir}"
+        mv "${tmp_dir}/grpcurl" /usr/local/bin/grpcurl
+        chmod +x /usr/local/bin/grpcurl
+        rm -rf "${tmp_dir}"
+
+        if is_cmd_installed "grpcurl"; then
+            log_message "INFO" "grpcurl berhasil diinstal: $(grpcurl -version 2>&1)"
+        else
+            log_message "ERROR" "grpcurl gagal terdeteksi setelah instalasi. Cek manual nanti."
+        fi
+    else
+        rm -rf "${tmp_dir}"
+        log_message "ERROR" "Gagal download grpcurl dari ${download_url}."
+        log_message "WARN"  "Sistem kuota TIDAK akan berfungsi tanpa grpcurl."
+        log_message "WARN"  "Install manual nanti dengan:"
+        log_message "WARN"  "  curl -fsSL -o grpcurl.tar.gz ${download_url}"
+        log_message "WARN"  "  tar -xzf grpcurl.tar.gz && mv grpcurl /usr/local/bin/"
     fi
 }
 
@@ -175,6 +233,43 @@ setup_tools() {
     wget -q -O /root/api/package.json "${REPO_URL}/package.json"
 }
 
+verify_installation() {
+    log_message "INFO" "Memverifikasi instalasi komponen kritis..."
+    local all_ok=true
+
+    if is_cmd_installed "sing-box"; then
+        log_message "INFO" "✓ sing-box terinstal: $(sing-box version 2>&1 | head -n1)"
+    else
+        log_message "ERROR" "✗ sing-box TIDAK terinstal."
+        all_ok=false
+    fi
+
+    if is_cmd_installed "grpcurl"; then
+        log_message "INFO" "✓ grpcurl terinstal: $(grpcurl -version 2>&1)"
+    else
+        log_message "ERROR" "✗ grpcurl TIDAK terinstal — kuota tidak akan berfungsi!"
+        all_ok=false
+    fi
+
+    if is_cmd_installed "haproxy"; then
+        log_message "INFO" "✓ haproxy terinstal."
+    else
+        log_message "ERROR" "✗ haproxy TIDAK terinstal."
+        all_ok=false
+    fi
+
+    if [ -d /root/protos/app/stats/command ] && [ -f /root/protos/app/stats/command/command.proto ]; then
+        log_message "INFO" "✓ Proto file untuk stats sudah ada."
+    else
+        log_message "ERROR" "✗ Proto file TIDAK lengkap di /root/protos."
+        all_ok=false
+    fi
+
+    if [ "$all_ok" = false ]; then
+        log_message "WARN" "Beberapa komponen gagal terinstal. Cek log di atas sebelum lanjut."
+    fi
+}
+
 finalize_installation() {
     log_message "INFO" "Menyelesaikan instalasi dan merestart layanan..."
     systemctl daemon-reload
@@ -200,12 +295,14 @@ main() {
     install_dependencies
     setup_directories
     download_and_setup_singbox
+    install_grpcurl
     install_haproxy
     configure_domain_and_ssl
     download_configurations
     tune_system_performance
     install_nodejs
     setup_tools
+    verify_installation
     finalize_installation
     
 
