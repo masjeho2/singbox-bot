@@ -42,6 +42,25 @@ log_message() {
 is_pkg_installed() { dpkg -l "$1" 2>/dev/null | grep -q "^ii"; }
 is_cmd_installed() { command -v "$1" &>/dev/null; }
 
+# --- [ FIX #1: PAKSA IPv4 UNTUK WGET/CURL/APT ] ---
+# Penting: beberapa VPS (terutama yg punya IPv6 address tapi route-nya mati)
+# akan bikin wget/curl default ke IPv6 (SYN-SENT timeout). Paksa IPv4.
+force_ipv4() {
+    log_message "INFO" "Memaksa IPv4 untuk wget/curl/apt (fix koneksi IPv6)..."
+    mkdir -p /etc/apt/apt.conf.d
+    cat > /etc/apt/apt.conf.d/99-force-ipv4 << 'EOF'
+Acquire::ForceIPv4 "true";
+EOF
+    cat > /root/.wgetrc << 'EOF'
+prefer_family = IPv4
+EOF
+    cat > /root/.curlrc << 'EOF'
+-4
+EOF
+    chmod 644 /root/.wgetrc /root/.curlrc
+    log_message "INFO" "IPv4 forced."
+}
+
 # --- [ PROSES INSTALASI ] ---
 
 update_system() {
@@ -140,10 +159,32 @@ install_grpcurl() {
 
 install_haproxy() {
     ln -fs /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
-    if ! is_pkg_installed "haproxy"; then
-        log_message "INFO" "Menginstal HAProxy..."
-        add-apt-repository ppa:vbernat/haproxy-2.8 -y
+    if is_pkg_installed "haproxy"; then
+        log_message "INFO" "HAProxy sudah terinstal, lewati."
+        systemctl enable haproxy
+        return 0
+    fi
+
+    # --- [ FIX #2: SKIP PPA LAUNCHPAD JIKA REPO UDAH PUNYA HAPROXY ] ---
+    # Launchpad (PPA host) sering tidak reachable di VPS tertentu.
+    # Ubuntu 22.04/24.04 sudah menyediakan HAProxy 2.4+/2.8+ di repo utama,
+    # jadi kita coba repo utama dulu, baru fallback ke PPA kalau perlu.
+    log_message "INFO" "Mencoba install HAProxy dari repo Ubuntu (tanpa PPA)..."
+    if apt-get install -y haproxy 2>&1 | tail -3; then
+        if is_pkg_installed "haproxy"; then
+            log_message "INFO" "HAProxy terinstal dari repo Ubuntu."
+            systemctl enable haproxy
+            return 0
+        fi
+    fi
+
+    # Fallback: coba PPA (mungkin gagal di VPS tanpa akses ke launchpad)
+    log_message "WARN" "Repo Ubuntu tidak menyediakan haproxy, mencoba PPA vbernat/haproxy-2.8..."
+    if add-apt-repository ppa:vbernat/haproxy-2.8 -y 2>/dev/null; then
         apt-get update && apt-get install -y "haproxy=2.8.*"
+    else
+        log_message "ERROR" "Gagal install haproxy (PPA launchpad tidak reachable)."
+        log_message "WARN"  "Coba manual: apt-get install haproxy"
     fi
     systemctl enable haproxy
 }
@@ -178,7 +219,7 @@ configure_domain_and_ssl() {
 
 download_configurations() {
     log_message "INFO" "Mengunduh file konfigurasi dari GitHub..."
-    
+
     # Download Config Sing-box
     wget -q -O /etc/sing-box/config.json "${REPO_URL}/config.json"
     log_message "INFO" "config.json berhasil diunduh."
@@ -186,6 +227,17 @@ download_configurations() {
     # Download Config HAProxy
     wget -q -O /etc/haproxy/haproxy.cfg "${REPO_URL}/haproxy.cfg"
     log_message "INFO" "haproxy.cfg berhasil diunduh."
+
+    # --- [ FIX #3: REPLACE '::' KE '0.0.0.0' DI INBOUNDS ] ---
+    # config.json dari repo pakai "listen": "::" (IPv6 wildcard).
+    # Jika VPS disable IPv6, sing-box akan crash karena tidak bisa bind ke '::'.
+    # Ganti ke "0.0.0.0" supaya kompatibel dengan VPS IPv4-only / IPv6-disabled.
+    if grep -q '"listen": "::"' /etc/sing-box/config.json 2>/dev/null; then
+        sed -i 's/"listen": "::"/"listen": "0.0.0.0"/g' /etc/sing-box/config.json
+        local count
+        count=$(grep -c '"listen": "0.0.0.0"' /etc/sing-box/config.json)
+        log_message "INFO" "FIX #3: Mengganti '::' → '0.0.0.0' di ${count} inbounds (IPv6-safe)."
+    fi
 }
 
 tune_system_performance() {
@@ -291,6 +343,7 @@ main() {
     log_message "INFO" "=============================================="
     echo ""
 
+    force_ipv4
     update_system
     install_dependencies
     setup_directories
