@@ -187,6 +187,35 @@ systemctl status sing-box haproxy
 
 ---
 
+## 🗑️ Uninstall
+
+Script `uninstall.sh` sudah tersedia untuk remove semua komponen dengan bersih.
+
+### Mode
+
+| Mode | Flag | Yang dihapus | Yang di-keep |
+|---|---|---|---|
+| **Full** | `--full` | sing-box, haproxy, api.js, protos, tools, grpcurl, acme.sh, node/nvm, PM2, certs, config, logs | — |
+| **Keep tools** | `--keep` | sing-box, haproxy, api.js, PM2 | node, grpcurl, tools, acme.sh, protos |
+
+### Cara pakai
+
+```bash
+# Full uninstall (hapus semua)
+bash -c "$(curl -sL https://raw.githubusercontent.com/masjeho2/singbox-bot/main/uninstall.sh)" --full
+
+# Keep tools, cuma remove services
+bash -c "$(curl -sL https://raw.githubusercontent.com/masjeho2/singbox-bot/main/uninstall.sh)" --keep
+
+# Interactive (tanya mode dulu)
+bash -c "$(curl -sL https://raw.githubusercontent.com/masjeho2/singbox-bot/main/uninstall.sh)"
+```
+
+> ⚠️ Uninstall akan minta **konfirmasi `y/N`** sebelum hapus apa pun.
+> Setelah selesai, **reboot disarankan** untuk bersihkan semua service.
+
+---
+
 ## 📜 Lisensi
 
 MIT — bebas dipake, modifikasi, distribusi. **Tanggung jawab sendiri** untuk legalitas penggunaan di negara lo.
