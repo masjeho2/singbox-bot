@@ -283,6 +283,18 @@ setup_tools() {
     wget -q -O /root/protos/common/serial/typed_message.proto "${REPO_URL}/protos/common/serial/typed_message.proto"    
     mkdir -p /root/api
     wget -q -O /root/api/package.json "${REPO_URL}/package.json"
+    wget -q -O /root/api/api-server.js "${REPO_URL}/api-server.js"
+    chmod +x /root/api/api-server.js
+    log_message "INFO" "API server di-download ke /root/api/api-server.js"
+    
+    # Install npm dependencies untuk API server
+    log_message "INFO" "Menginstal npm dependencies API server..."
+    if command -v node >/dev/null 2>&1; then
+        cd /root/api && npm install --silent 2>&1 | tail -3
+    else
+        log_message "WARN" "Node.js tidak ditemukan, npm install dilewati"
+    fi
+    cd - >/dev/null
 }
 
 verify_installation() {
@@ -317,6 +329,19 @@ verify_installation() {
         all_ok=false
     fi
 
+if [ -f "/root/api/api-server.js" ]; then
+        log_message "INFO" "✓ API server terinstal di /root/api/"
+    else
+        log_message "ERROR" "✗ API server TIDAK terinstal."
+        all_ok=false
+    fi
+
+    if [ -d "/root/api/node_modules" ]; then
+        log_message "INFO" "✓ API npm dependencies terinstall"
+    else
+        log_message "WARN" "✗ API npm dependencies belum terinstall"
+    fi
+
     if [ "$all_ok" = false ]; then
         log_message "WARN" "Beberapa komponen gagal terinstal. Cek log di atas sebelum lanjut."
     fi
@@ -328,6 +353,16 @@ finalize_installation() {
     systemctl restart haproxy
     systemctl restart sing-box.service
     
+# Start API server via PM2
+    if command -v pm2 >/dev/null 2>&1; then
+        log_message "INFO" "Memulai API server via PM2..."
+        cd /root/api && pm2 start api-server.js --name api 2>&1 | tail -5
+        pm2 save 2>/dev/null
+        log_message "INFO" "✓ API server berjalan via PM2"
+    else
+        log_message "WARN" "PM2 tidak ditemukan, API server tidak di-start otomatis"
+    fi
+
     local total_secs="$(($(date +%s) - start_time))"
     local mins=$((total_secs / 60))
     local secs=$((total_secs % 60))
