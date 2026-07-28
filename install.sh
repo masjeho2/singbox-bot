@@ -297,6 +297,13 @@ setup_tools() {
     cd - >/dev/null
 }
 
+setup_cronjobs() {
+    log_message "INFO" "Menambahkan cron job untuk membersihkan log..."
+    # Menghapus log akses sing-box setiap 10 menit untuk mencegah file membengkak
+    echo "*/10 * * * * root truncate -s 0 /var/log/sing-box/access.log" >> /etc/crontab
+    log_message "INFO" "Cron job untuk log berhasil ditambahkan."
+}
+
 verify_installation() {
     log_message "INFO" "Memverifikasi instalasi komponen kritis..."
     local all_ok=true
@@ -390,6 +397,7 @@ main() {
     tune_system_performance
     install_nodejs
     setup_tools
+    setup_cronjobs
     verify_installation
     finalize_installation
     
