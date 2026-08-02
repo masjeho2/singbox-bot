@@ -265,6 +265,31 @@ install_nodejs() {
         # Hanya dieksekusi jika Node.js sedari awal sudah ada
         log_message "INFO" "Node.js sudah terinstal."
     fi
+
+    # Pastikan nvm ter-source di shell non-login (installer jalan via setsid)
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+    # Symlink node/npm ke global PATH supaya systemd/PM2/panel-bot bisa nemu
+    # (di Ubuntu 22.04 node dari nvm TIDAK masuk global PATH -> PM2 check gagal)
+    local NODE_BIN
+    NODE_BIN="$(dirname "$(command -v node 2>/dev/null)")"
+    if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN/node" ]; then
+        ln -sf "$NODE_BIN/node" /usr/local/bin/node
+        ln -sf "$NODE_BIN/npm"  /usr/local/bin/npm
+    fi
+
+    # Install PM2 global kalau belum ada
+    if ! command -v pm2 >/dev/null 2>&1; then
+        log_message "INFO" "PM2 belum terinstal. Menginstal PM2..."
+        npm install -g pm2
+        if [ -n "$NODE_BIN" ] && [ -x "$NODE_BIN/pm2" ]; then
+            ln -sf "$NODE_BIN/pm2" /usr/local/bin/pm2
+        fi
+        log_message "INFO" "PM2 berhasil diinstal."
+    else
+        log_message "INFO" "PM2 sudah terinstal."
+    fi
 }
 
 setup_tools() {
@@ -361,10 +386,20 @@ finalize_installation() {
     systemctl restart sing-box.service
     
 # Start API server via PM2
+    # Pastikan nvm + pm2 ke-source (installer jalan via setsid, non-login shell)
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+    # Matikan systemd singbox-api lama kalau ada (konflik port 3030)
+    systemctl stop singbox-api 2>/dev/null || true
+    systemctl disable singbox-api 2>/dev/null || true
+
     if command -v pm2 >/dev/null 2>&1; then
         log_message "INFO" "Memulai API server via PM2..."
         cd /root/api && pm2 start api-server.js --name api 2>&1 | tail -5
         pm2 save 2>/dev/null
+        # Auto-boot PM2 saat VPS reboot
+        pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
         log_message "INFO" "✓ API server berjalan via PM2"
     else
         log_message "WARN" "PM2 tidak ditemukan, API server tidak di-start otomatis"
