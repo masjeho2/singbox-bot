@@ -26,6 +26,9 @@ GB='\e[32;1m'
 YB='\e[33;1m'
 RB='\e[31;1m'
 WB='\e[37;1m'
+CY='\e[36;1m'
+MG='\e[35;1m'
+DM='\e[2m'
 
 # URL Raw dari repositori GitHub (masih dipakai utk binary, service, proto, API)
 REPO_URL="https://raw.githubusercontent.com/masjeho2/singbox-bot/main"
@@ -64,20 +67,93 @@ FRP_SKIP="${FRP_SKIP:-0}"
 
 start_time=$(date +%s)
 
+LOG_FILE="/var/log/singbox-installer.log"
+TOTAL_STEPS=16
+STEP_NO=0
+
 log_message() {
     local type="$1"
     local message="$2"
+    local icon color
     case "$type" in
-        "INFO")  color="$GB" ;;
-        "WARN")  color="$YB" ;;
-        "ERROR") color="$RB" ;;
-        *)       color="$NC" ;;
+        "INFO")  icon="•"; color="$CY" ;;
+        "OK")    icon="✔"; color="$GB" ;;
+        "WARN")  icon="!"; color="$YB" ;;
+        "ERROR") icon="✘"; color="$RB" ;;
+        *)       icon=" "; color="$NC" ;;
     esac
-    echo -e "${color}[ ${type} ]${NC} ${WB}${message}${NC}"
+    echo -e "  ${color}${icon}${NC} ${message}"
+}
+
+hr() { printf "${DM}  "; printf '─%.0s' {1..54}; printf "${NC}\n"; }
+
+# Judul langkah bernomor: [3/16] Judul
+step() {
+    STEP_NO=$((STEP_NO + 1))
+    echo ""
+    echo -e "${CY}[${STEP_NO}/${TOTAL_STEPS}]${NC} ${WB}$1${NC}"
+    hr
+}
+
+# Judul bagian tanpa nomor (untuk pengaturan awal)
+section() {
+    echo ""
+    echo -e "${MG}▌${NC} ${WB}$1${NC}"
+    hr
+}
+
+box_line() { printf "${CY}║${NC} %-54s ${CY}║${NC}\n" "$1"; }
+
+banner() {
+    echo ""
+    echo -e "${CY}╔$(printf '═%.0s' {1..56})╗${NC}"
+    box_line ""
+    box_line "   SING-BOX  +  HAPROXY  +  FRPC"
+    box_line "   Auto Installer - tanpa TLS - custom path"
+    box_line ""
+    box_line "   Bahan dari: masjeho2/singbox-bot"
+    echo -e "${CY}╚$(printf '═%.0s' {1..56})╝${NC}"
+}
+
+# Jalankan perintah senyap (output ke log) dengan spinner.
+run_quiet() {
+    local desc="$1"; shift
+    local frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    local i=0 rc=0
+    "$@" >> "$LOG_FILE" 2>&1 &
+    local pid=$!
+    if [ -t 1 ]; then
+        while kill -0 "$pid" 2>/dev/null; do
+            printf "\r  ${CY}%s${NC} %s" "${frames[i % 10]}" "$desc"
+            i=$((i + 1))
+            sleep 0.1
+        done
+    fi
+    wait "$pid" || rc=$?
+    printf "\r\033[K"
+    if [ "$rc" -eq 0 ]; then
+        log_message "OK" "$desc"
+    else
+        log_message "ERROR" "${desc} — GAGAL (log: ${LOG_FILE})"
+        tail -n 15 "$LOG_FILE" | sed 's/^/      /'
+        return "$rc"
+    fi
+}
+
+svc_status() {
+    if systemctl is-active --quiet "$1" 2>/dev/null; then
+        echo -e "${GB}● aktif${NC}"
+    else
+        echo -e "${RB}● tidak aktif${NC}"
+    fi
 }
 
 is_pkg_installed() { dpkg -l "$1" 2>/dev/null | grep -q "^ii"; }
 is_cmd_installed() { command -v "$1" &>/dev/null; }
+
+# Cek apakah ada terminal untuk input interaktif (stderr TIDAK boleh dibuang di
+# perintah read, karena teks prompt dikirim lewat stderr).
+have_tty() { { : < /dev/tty; } 2>/dev/null; }
 
 # --- [ INPUT PREFIX PATH ] ---
 ask_path_id() {
@@ -87,10 +163,11 @@ ask_path_id() {
         [ -s "$PATH_ID_FILE" ] && saved="$(cat "$PATH_ID_FILE")"
 
         local input=""
-        echo -e "${WB}Prefix path dipakai untuk semua inbound, contoh: ${YB}id-6${NC}"
-        echo -e "${WB}  WS   : /<prefix>/vmess, /<prefix>/vless-ws, /<prefix>/trojan-ws${NC}"
-        echo -e "${WB}  gRPC : <prefix>-vmess-grpc, <prefix>-vless-grpc, <prefix>-trojan-grpc${NC}"
-        read -rp "$(echo -e "${WB}Masukkan prefix path [${saved}]: ${NC}")" input < /dev/tty 2>/dev/null || input=""
+        section "PENGATURAN"
+        echo -e "  ${WB}Prefix path${NC} menentukan URL endpoint semua protokol."
+        echo -e "  ${DM}Contoh prefix${NC} ${YB}id-6${NC}  →  ${DM}/id-6/vmess   ·   id-6-vmess-grpc${NC}"
+        echo ""
+        have_tty && read -rp "$(echo -e "  ${CY}➜${NC} ${WB}Prefix path${NC} ${DM}[${saved}]${NC} : ")" input < /dev/tty || input=""
         PATH_ID="${input:-$saved}"
     fi
 
@@ -104,7 +181,68 @@ ask_path_id() {
         exit 1
     fi
 
-    log_message "INFO" "Prefix path yang dipakai: ${PATH_ID}"
+    log_message "OK" "Prefix path: ${PATH_ID}"
+}
+
+mask_token() {
+    local t="$1"
+    if [ -z "$t" ]; then echo "(belum diisi)"; return; fi
+    [ "${#t}" -le 4 ] && { echo "****"; return; }
+    echo "${t:0:2}$(printf '*%.0s' $(seq 1 $((${#t} - 4))))${t: -2}"
+}
+
+confirm_settings() {
+    section "RINGKASAN PENGATURAN"
+    printf "  ${DM}%-14s${NC} ${YB}%s${NC}\n" "Prefix path" "$PATH_ID"
+    printf "  ${DM}%-14s${NC} /%s/vmess  /%s/vless-ws  /%s/trojan-ws\n" "WebSocket" "$PATH_ID" "$PATH_ID" "$PATH_ID"
+    printf "  ${DM}%-14s${NC} %s-vmess-grpc  %s-vless-grpc  %s-trojan-grpc\n" "gRPC" "$PATH_ID" "$PATH_ID" "$PATH_ID"
+    if [ "$FRP_SKIP" = "1" ]; then
+        printf "  ${DM}%-14s${NC} dilewati\n" "frpc"
+    else
+        printf "  ${DM}%-14s${NC} %s:%s\n" "frp server" "${FRP_SERVER_ADDR:-(belum diisi)}" "$FRP_SERVER_PORT"
+        printf "  ${DM}%-14s${NC} %s\n" "frp token" "$(mask_token "$FRP_TOKEN")"
+        printf "  ${DM}%-14s${NC} WS %s  ·  gRPC %s\n" "remote port" "$FRP_WS_REMOTE_PORT" "$FRP_GRPC_REMOTE_PORT"
+    fi
+    echo ""
+    local ans=""
+    have_tty && read -rp "$(echo -e "  ${CY}➜${NC} ${WB}Lanjutkan instalasi?${NC} ${DM}[Y/n]${NC} : ")" ans < /dev/tty || ans=""
+    if [[ "$ans" =~ ^[Nn]$ ]]; then
+        log_message "WARN" "Instalasi dibatalkan."
+        exit 0
+    fi
+}
+
+print_summary() {
+    local total_secs="$(($(date +%s) - start_time))"
+    echo ""
+    echo -e "${GB}╔$(printf '═%.0s' {1..56})╗${NC}"
+    printf "${GB}║${NC} %-54s ${GB}║${NC}\n" "   INSTALASI SELESAI  ($((total_secs / 60)) menit $((total_secs % 60)) detik)"
+    echo -e "${GB}╚$(printf '═%.0s' {1..56})╝${NC}"
+
+    section "ENDPOINT  ${DM}(prefix: ${PATH_ID})${NC}"
+    printf "  ${DM}%-8s %-22s %s${NC}\n" "Protokol" "WebSocket (port 80)" "gRPC (port 8081)"
+    printf "  %-8s %-22s %s\n" "VMess"  "/${PATH_ID}/vmess"     "${PATH_ID}-vmess-grpc"
+    printf "  %-8s %-22s %s\n" "VLESS"  "/${PATH_ID}/vless-ws"  "${PATH_ID}-vless-grpc"
+    printf "  %-8s %-22s %s\n" "Trojan" "/${PATH_ID}/trojan-ws" "${PATH_ID}-trojan-grpc"
+
+    section "STATUS LAYANAN"
+    printf "  %-12s %b\n" "sing-box" "$(svc_status sing-box)"
+    printf "  %-12s %b\n" "haproxy"  "$(svc_status haproxy)"
+    if [ "$FRP_SKIP" != "1" ]; then
+        printf "  %-12s %b\n" "frpc" "$(svc_status frpc)"
+    fi
+    if ss -ltn 2>/dev/null | grep -q ':3030 '; then
+        printf "  %-12s %b\n" "api (pm2)" "${GB}● aktif${NC}"
+    else
+        printf "  %-12s %b\n" "api (pm2)" "${RB}● tidak aktif${NC}"
+    fi
+
+    section "FILE PENTING"
+    printf "  ${DM}%-14s${NC} %s\n" "sing-box" "/etc/sing-box/config.json"
+    printf "  ${DM}%-14s${NC} %s\n" "haproxy" "/etc/haproxy/haproxy.cfg"
+    [ "$FRP_SKIP" = "1" ] || printf "  ${DM}%-14s${NC} %s  ${DM}(edit lalu: systemctl restart frpc)${NC}\n" "frpc" "/etc/frp/frpc.toml"
+    printf "  ${DM}%-14s${NC} %s\n" "log installer" "$LOG_FILE"
+    echo ""
 }
 
 # --- [ FIX #1: PAKSA IPv4 UNTUK WGET/CURL/APT ] ---
@@ -127,20 +265,25 @@ EOF
 # --- [ PROSES INSTALASI ] ---
 
 update_system() {
-    log_message "INFO" "Memperbarui daftar paket sistem..."
-    apt-get update -y
-    apt-get full-upgrade -y
-    apt-get autoremove -y
+    export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
+    : > "$LOG_FILE"
+    run_quiet "Memperbarui daftar paket" apt-get update -y
+    run_quiet "Upgrade paket sistem (bisa beberapa menit)" \
+        apt-get -o Dpkg::Options::=--force-confold -o Dpkg::Options::=--force-confdef full-upgrade -y
+    run_quiet "Membersihkan paket tak terpakai" apt-get autoremove -y
 }
 
 install_dependencies() {
-    log_message "INFO" "Menginstal dependensi yang dibutuhkan..."
     local pkgs=(socat curl wget screen cron netfilter-persistent vnstat fail2ban sysstat jq gnupg software-properties-common tar)
+    local missing=() pkg
     for pkg in "${pkgs[@]}"; do
-        if ! is_pkg_installed "$pkg"; then
-            apt-get install -y "$pkg"
-        fi
+        is_pkg_installed "$pkg" || missing+=("$pkg")
     done
+    if [ "${#missing[@]}" -eq 0 ]; then
+        log_message "OK" "Semua dependensi sudah terpasang"
+    else
+        run_quiet "Memasang ${#missing[@]} paket: ${missing[*]}" apt-get install -y "${missing[@]}"
+    fi
 }
 
 setup_directories() {
@@ -167,8 +310,8 @@ download_and_setup_singbox() {
     # 3. Download GeoIP & GeoSite
     if [ ! -f /usr/local/share/sing-box/geoip.dat ]; then
         log_message "INFO" "Mengunduh GeoIP & GeoSite rules..."
-        curl -L -o /usr/local/share/sing-box/geoip.dat https://github.com/malikshi/v2ray-rules-dat/releases/latest/download/geoip.dat
-        curl -L -o /usr/local/share/sing-box/geosite.dat https://github.com/malikshi/v2ray-rules-dat/releases/latest/download/geosite.dat
+        curl -sSL -o /usr/local/share/sing-box/geoip.dat https://github.com/malikshi/v2ray-rules-dat/releases/latest/download/geoip.dat
+        curl -sSL -o /usr/local/share/sing-box/geosite.dat https://github.com/malikshi/v2ray-rules-dat/releases/latest/download/geosite.dat
     fi
 }
 
@@ -521,13 +664,14 @@ EOF
 # --- [ FRPC ] ---
 prompt_value() {
     # prompt_value <var_name> <label> <default>
-    local __var="$1" __label="$2" __def="$3" __in=""
+    local __var="$1" __label="$2" __def="$3" __in="" __hint
     if [ -n "${!__var}" ]; then return 0; fi
     if [ -n "$__def" ]; then
-        read -rp "$(echo -e "${WB}${__label} [${__def}]: ${NC}")" __in < /dev/tty 2>/dev/null || __in=""
+        __hint="${DM}[${__def}]${NC}"
     else
-        read -rp "$(echo -e "${WB}${__label} (kosongkan untuk isi nanti): ${NC}")" __in < /dev/tty 2>/dev/null || __in=""
+        __hint="${DM}(Enter = isi nanti)${NC}"
     fi
+    have_tty && read -rp "$(echo -e "  ${CY}➜${NC} ${WB}$(printf '%-28s' "$__label")${NC} ${__hint} : ")" __in < /dev/tty || __in=""
     printf -v "$__var" '%s' "${__in:-$__def}"
 }
 
@@ -539,13 +683,13 @@ ask_frpc_config() {
         return 0
     fi
 
-    echo ""
-    log_message "INFO" "--- Konfigurasi frpc (tunnel ke server FRP) ---"
-    prompt_value FRP_SERVER_ADDR      "Server address FRP (IP/domain)" ""
-    prompt_value FRP_SERVER_PORT      "Server port FRP"                "7000"
-    prompt_value FRP_TOKEN            "Auth token"                     ""
-    prompt_value FRP_WS_REMOTE_PORT   "Remote port WebSocket (-> lokal :80)"   "8443"
-    prompt_value FRP_GRPC_REMOTE_PORT "Remote port gRPC (-> lokal :8081)"      "8445"
+    section "KONFIGURASI FRPC  ${DM}(tunnel ke server FRP)${NC}"
+    prompt_value FRP_SERVER_ADDR      "Server address (IP/domain)" ""
+    prompt_value FRP_SERVER_PORT      "Server port"                "7000"
+    prompt_value FRP_TOKEN            "Auth token"                 ""
+    prompt_value FRP_WS_REMOTE_PORT   "Remote port WebSocket"      "8443"
+    prompt_value FRP_GRPC_REMOTE_PORT "Remote port gRPC"           "8445"
+    echo -e "  ${DM}(WebSocket → lokal :80  ·  gRPC → lokal :8081, mengikuti HAProxy)${NC}"
 
     local v
     for v in FRP_SERVER_PORT FRP_WS_REMOTE_PORT FRP_GRPC_REMOTE_PORT; do
@@ -662,7 +806,7 @@ start_frpc() {
     systemctl restart frpc.service
     sleep 1
     if systemctl is-active --quiet frpc.service; then
-        log_message "INFO" "✓ frpc berjalan (WS remote:${FRP_WS_REMOTE_PORT}, gRPC remote:${FRP_GRPC_REMOTE_PORT})"
+        log_message "OK" "frpc berjalan (WS remote:${FRP_WS_REMOTE_PORT}, gRPC remote:${FRP_GRPC_REMOTE_PORT})"
     else
         log_message "ERROR" "frpc gagal start. Cek: journalctl -u frpc -n 30"
     fi
@@ -767,52 +911,52 @@ verify_installation() {
     local all_ok=true
 
     if is_cmd_installed "sing-box"; then
-        log_message "INFO" "✓ sing-box terinstal: $(sing-box version 2>&1 | head -n1)"
+        log_message "OK" "sing-box terinstal: $(sing-box version 2>&1 | head -n1)"
     else
-        log_message "ERROR" "✗ sing-box TIDAK terinstal."
+        log_message "ERROR" "sing-box TIDAK terinstal."
         all_ok=false
     fi
 
     if is_cmd_installed "grpcurl"; then
-        log_message "INFO" "✓ grpcurl terinstal: $(grpcurl -version 2>&1)"
+        log_message "OK" "grpcurl terinstal: $(grpcurl -version 2>&1)"
     else
-        log_message "ERROR" "✗ grpcurl TIDAK terinstal — kuota tidak akan berfungsi!"
+        log_message "ERROR" "grpcurl TIDAK terinstal — kuota tidak akan berfungsi!"
         all_ok=false
     fi
 
     if is_cmd_installed "haproxy"; then
-        log_message "INFO" "✓ haproxy terinstal."
+        log_message "OK" "haproxy terinstal."
     else
-        log_message "ERROR" "✗ haproxy TIDAK terinstal."
+        log_message "ERROR" "haproxy TIDAK terinstal."
         all_ok=false
     fi
 
     if [ "$FRP_SKIP" != "1" ]; then
         if is_cmd_installed "frpc"; then
-            log_message "INFO" "✓ frpc terinstal."
+            log_message "OK" "frpc terinstal."
         else
-            log_message "WARN" "✗ frpc belum terinstal."
+            log_message "WARN" "frpc belum terinstal."
         fi
     fi
 
     if [ -f /root/protos/app/stats/command/command.proto ]; then
-        log_message "INFO" "✓ Proto file untuk stats sudah ada."
+        log_message "OK" "Proto file untuk stats sudah ada."
     else
-        log_message "ERROR" "✗ Proto file TIDAK lengkap di /root/protos."
+        log_message "ERROR" "Proto file TIDAK lengkap di /root/protos."
         all_ok=false
     fi
 
     if [ -f "/root/api/api-server.js" ]; then
-        log_message "INFO" "✓ API server terinstal di /root/api/"
+        log_message "OK" "API server terinstal di /root/api/"
     else
-        log_message "ERROR" "✗ API server TIDAK terinstal."
+        log_message "ERROR" "API server TIDAK terinstal."
         all_ok=false
     fi
 
     if [ -d "/root/api/node_modules" ]; then
-        log_message "INFO" "✓ API npm dependencies terinstall"
+        log_message "OK" "API npm dependencies terinstall"
     else
-        log_message "WARN" "✗ API npm dependencies belum terinstall"
+        log_message "WARN" "API npm dependencies belum terinstall"
     fi
 
     if [ "$all_ok" = false ]; then
@@ -841,59 +985,44 @@ finalize_installation() {
         cd /root/api && pm2 start api-server.js --name api 2>&1 | tail -5
         pm2 save 2>/dev/null
         pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
-        log_message "INFO" "✓ API server berjalan via PM2"
+        log_message "OK" "API server berjalan via PM2"
     else
         log_message "WARN" "PM2 tidak ditemukan, API server tidak di-start otomatis"
     fi
 
-    local total_secs="$(($(date +%s) - start_time))"
-    local mins=$((total_secs / 60))
-    local secs=$((total_secs % 60))
-    log_message "INFO" "Instalasi selesai dalam ${mins} menit ${secs} detik!"
-    echo ""
-    log_message "INFO" "Ringkasan path (prefix: ${PATH_ID}):"
-    log_message "INFO" "  VMess  WS   : /${PATH_ID}/vmess        | gRPC: ${PATH_ID}-vmess-grpc"
-    log_message "INFO" "  VLESS  WS   : /${PATH_ID}/vless-ws     | gRPC: ${PATH_ID}-vless-grpc"
-    log_message "INFO" "  Trojan WS   : /${PATH_ID}/trojan-ws    | gRPC: ${PATH_ID}-trojan-grpc"
-    log_message "INFO" "  Port: WS=80, gRPC=8081 (tanpa TLS)"
-    [ "$FRP_SKIP" = "1" ] || log_message "INFO" "  frpc: /etc/frp/frpc.toml (systemctl restart frpc setelah edit)"
 }
 
 # --- [ EKSEKUSI UTAMA ] ---
 main() {
     clear 2>/dev/null || true
-    log_message "INFO" "=============================================="
-    log_message "INFO" "    Auto Installer Sing-box + HAProxy         "
-    log_message "INFO" "    (tanpa TLS, custom path)                  "
-    log_message "INFO" "    Bahan dari: masjeho2/singbox-bot          "
-    log_message "INFO" "=============================================="
-    echo ""
+    banner
 
-    # Tanya prefix di awal supaya user tidak menunggu apt upgrade dulu
+    # Semua pertanyaan di awal, supaya sisanya jalan otomatis tanpa ditunggu
     ask_path_id
     ask_frpc_config
+    confirm_settings
 
-    force_ipv4
-    update_system
-    install_dependencies
-    setup_directories
-    save_path_id
-    download_and_setup_singbox
-    install_grpcurl
-    install_haproxy
-    write_singbox_config
-    write_haproxy_config
-    install_frpc
-    tune_system_performance
-    install_nodejs
-    setup_tools
-    setup_cronjobs
-    verify_installation
-    finalize_installation
+    step "Memaksa koneksi IPv4";               force_ipv4
+    step "Memperbarui sistem";                 update_system
+    step "Memasang dependensi";                install_dependencies
+    step "Menyiapkan direktori";               setup_directories; save_path_id
+    step "Memasang sing-box";                  download_and_setup_singbox
+    step "Memasang grpcurl";                   install_grpcurl
+    step "Memasang HAProxy";                   install_haproxy
+    step "Menulis config sing-box";            write_singbox_config
+    step "Menulis config HAProxy";             write_haproxy_config
+    step "Memasang frpc";                      install_frpc
+    step "Tuning jaringan (BBR)";              tune_system_performance
+    step "Memasang Node.js & PM2";             install_nodejs
+    step "Menyiapkan tools & API server";      setup_tools
+    step "Menambahkan cron job";               setup_cronjobs
+    step "Verifikasi komponen";                verify_installation
+    step "Menjalankan layanan";                finalize_installation
 
-    echo ""
+    print_summary
+
     local answer=""
-    read -rp $'\e[33;1m[ INFO ]\e[0m \e[37;1mApakah Anda ingin me-reboot VPS sekarang? (Y/N): \e[0m' answer < /dev/tty 2>/dev/null || answer=""
+    have_tty && read -rp "$(echo -e "  ${CY}➜${NC} ${WB}Reboot VPS sekarang?${NC} ${DM}[y/N]${NC} : ")" answer < /dev/tty || answer=""
     if [[ "$answer" =~ ^[Yy]$ ]]; then
         reboot
     fi
