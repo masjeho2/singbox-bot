@@ -588,11 +588,14 @@ global
 
 defaults
     log global
-    mode http             # Gunakan mode http untuk WebSocket dan gRPC
+    mode http
     timeout connect 5s
-    timeout client 30s
-    timeout server 30s
-    option http-server-close
+    timeout client 1h
+    timeout server 1h
+    timeout tunnel 1h
+    timeout http-request 10s
+    timeout http-keep-alive 10s
+    option http-keep-alive
     option forwardfor
 
 # --- Frontend gRPC (h2c, tanpa TLS) ---
@@ -641,15 +644,15 @@ backend api_backend
 # --- Backend untuk gRPC ---
 backend vmess-grpc-backend
     mode http
-    server vmess-grpc-server 127.0.0.1:20001 proto h2 check
+    server vmess-grpc-server 127.0.0.1:20001 proto h2
 
 backend vless-grpc-backend
     mode http
-    server vless-grpc-server 127.0.0.1:20002 proto h2 check
+    server vless-grpc-server 127.0.0.1:20002 proto h2
 
 backend trojan-grpc-backend
     mode http
-    server trojan-grpc-server 127.0.0.1:20003 proto h2 check
+    server trojan-grpc-server 127.0.0.1:20003 proto h2
 EOF
 
     if command -v haproxy >/dev/null 2>&1; then
@@ -774,6 +777,10 @@ serverAddr = "${addr}"
 serverPort = ${FRP_SERVER_PORT:-7000}
 auth.method = "token"
 auth.token = "${token}"
+transport.tcpMux = true
+transport.heartbeatInterval = 30
+transport.heartbeatTimeout = 90
+transport.poolCount = 10
 
 # Mengikuti HAProxy: WS di :80, gRPC di :8081
 [[proxies]]
