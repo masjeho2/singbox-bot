@@ -777,14 +777,14 @@ auth.token = "${token}"
 
 # Mengikuti HAProxy: WS di :80, gRPC di :8081
 [[proxies]]
-name = "websocket"
+name = "websocket-${PATH_ID}"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 80
 remotePort = ${FRP_WS_REMOTE_PORT:-8443}
 
 [[proxies]]
-name = "grpc"
+name = "grpc-${PATH_ID}"
 type = "tcp"
 localIP = "127.0.0.1"
 localPort = 8081
