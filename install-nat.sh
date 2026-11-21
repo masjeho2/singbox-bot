@@ -10,6 +10,8 @@
 #    (tidak lagi download dari GitHub). User dibiarkan kosong.
 #  - Input domain & penerbitan SSL (acme.sh) dihapus karena tanpa TLS.
 #  - grpcurl tetap dipasang (wajib untuk statistik kuota bot).
+#  - frpc ikut dipasang (/etc/frp/frpc.toml). Isian: serverAddr, serverPort,
+#    authToken, remotePort WS & gRPC (bisa lewat prompt, env, atau argumen).
 #
 # Pola path yang dihasilkan dari PATH_ID (contoh id-6):
 #   WebSocket : /id-6/vmess , /id-6/vless-ws , /id-6/trojan-ws
@@ -41,9 +43,24 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --path|-p) PATH_ID="$2"; shift 2 ;;
         --path=*)  PATH_ID="${1#*=}"; shift ;;
+        --frp-addr)        FRP_SERVER_ADDR="$2"; shift 2 ;;
+        --frp-port)        FRP_SERVER_PORT="$2"; shift 2 ;;
+        --frp-token)       FRP_TOKEN="$2"; shift 2 ;;
+        --frp-ws-port)     FRP_WS_REMOTE_PORT="$2"; shift 2 ;;
+        --frp-grpc-port)   FRP_GRPC_REMOTE_PORT="$2"; shift 2 ;;
+        --no-frp)          FRP_SKIP=1; shift ;;
         *) shift ;;
     esac
 done
+
+# --- frpc ---
+FRP_VERSION="0.60.0"
+FRP_SERVER_ADDR="${FRP_SERVER_ADDR:-}"
+FRP_SERVER_PORT="${FRP_SERVER_PORT:-}"
+FRP_TOKEN="${FRP_TOKEN:-}"
+FRP_WS_REMOTE_PORT="${FRP_WS_REMOTE_PORT:-}"
+FRP_GRPC_REMOTE_PORT="${FRP_GRPC_REMOTE_PORT:-}"
+FRP_SKIP="${FRP_SKIP:-0}"
 
 start_time=$(date +%s)
 
@@ -501,6 +518,156 @@ EOF
     fi
 }
 
+# --- [ FRPC ] ---
+prompt_value() {
+    # prompt_value <var_name> <label> <default>
+    local __var="$1" __label="$2" __def="$3" __in=""
+    if [ -n "${!__var}" ]; then return 0; fi
+    if [ -n "$__def" ]; then
+        read -rp "$(echo -e "${WB}${__label} [${__def}]: ${NC}")" __in < /dev/tty 2>/dev/null || __in=""
+    else
+        read -rp "$(echo -e "${WB}${__label} (kosongkan untuk isi nanti): ${NC}")" __in < /dev/tty 2>/dev/null || __in=""
+    fi
+    printf -v "$__var" '%s' "${__in:-$__def}"
+}
+
+is_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+
+ask_frpc_config() {
+    if [ "$FRP_SKIP" = "1" ]; then
+        log_message "INFO" "frpc dilewati (--no-frp)."
+        return 0
+    fi
+
+    echo ""
+    log_message "INFO" "--- Konfigurasi frpc (tunnel ke server FRP) ---"
+    prompt_value FRP_SERVER_ADDR      "Server address FRP (IP/domain)" ""
+    prompt_value FRP_SERVER_PORT      "Server port FRP"                "7000"
+    prompt_value FRP_TOKEN            "Auth token"                     ""
+    prompt_value FRP_WS_REMOTE_PORT   "Remote port WebSocket (-> lokal :80)"   "8443"
+    prompt_value FRP_GRPC_REMOTE_PORT "Remote port gRPC (-> lokal :8081)"      "8445"
+
+    local v
+    for v in FRP_SERVER_PORT FRP_WS_REMOTE_PORT FRP_GRPC_REMOTE_PORT; do
+        if ! is_port "${!v}"; then
+            log_message "ERROR" "${v}='${!v}' bukan port valid (1-65535)."
+            exit 1
+        fi
+    done
+}
+
+install_frpc() {
+    [ "$FRP_SKIP" = "1" ] && return 0
+
+    if is_cmd_installed "frpc"; then
+        log_message "INFO" "frpc sudah terinstal, dilewati."
+    else
+        log_message "INFO" "Menginstal frpc v${FRP_VERSION}..."
+        local arch
+        case "$(uname -m)" in
+            x86_64)  arch="amd64" ;;
+            aarch64) arch="arm64" ;;
+            armv7l)  arch="arm" ;;
+            *)
+                log_message "WARN" "Arsitektur $(uname -m) tidak dikenal, mencoba amd64..."
+                arch="amd64"
+                ;;
+        esac
+
+        local name="frp_${FRP_VERSION}_linux_${arch}"
+        local url="https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${name}.tar.gz"
+        local tmp_dir
+        tmp_dir="$(mktemp -d)"
+
+        if curl -fsSL -o "${tmp_dir}/frp.tar.gz" "$url" \
+           && tar -xzf "${tmp_dir}/frp.tar.gz" -C "$tmp_dir" \
+           && [ -f "${tmp_dir}/${name}/frpc" ]; then
+            cp "${tmp_dir}/${name}/frpc" /usr/local/bin/frpc
+            chmod +x /usr/local/bin/frpc
+            rm -rf "$tmp_dir"
+            log_message "INFO" "frpc terinstal: $(frpc -v 2>&1 | head -n1)"
+        else
+            rm -rf "$tmp_dir"
+            log_message "ERROR" "Gagal download/ekstrak frpc dari ${url}"
+            return 0
+        fi
+    fi
+
+    mkdir -p /etc/frp
+    write_frpc_config
+
+    cat > /etc/systemd/system/frpc.service << 'EOF'
+[Unit]
+Description=frp client (frpc)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable frpc.service >/dev/null 2>&1 || true
+}
+
+write_frpc_config() {
+    local addr="${FRP_SERVER_ADDR:-IP_SERVER_FRP}"
+    local token="${FRP_TOKEN:-GANTI_TOKEN}"
+    # escape \ dan " untuk string TOML
+    addr="${addr//\\/\\\\}";   addr="${addr//\"/\\\"}"
+    token="${token//\\/\\\\}"; token="${token//\"/\\\"}"
+
+    if [ -f /etc/frp/frpc.toml ]; then
+        cp -f /etc/frp/frpc.toml "/etc/frp/frpc.toml.bak.$(date +%s)"
+    fi
+
+    cat > /etc/frp/frpc.toml << EOF
+serverAddr = "${addr}"
+serverPort = ${FRP_SERVER_PORT:-7000}
+auth.method = "token"
+auth.token = "${token}"
+
+# Mengikuti HAProxy: WS di :80, gRPC di :8081
+[[proxies]]
+name = "websocket"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 80
+remotePort = ${FRP_WS_REMOTE_PORT:-8443}
+
+[[proxies]]
+name = "grpc"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8081
+remotePort = ${FRP_GRPC_REMOTE_PORT:-8445}
+EOF
+    chmod 600 /etc/frp/frpc.toml
+    log_message "INFO" "Config frpc ditulis di /etc/frp/frpc.toml"
+}
+
+start_frpc() {
+    [ "$FRP_SKIP" = "1" ] && return 0
+    is_cmd_installed "frpc" || return 0
+
+    if [ -z "$FRP_SERVER_ADDR" ] || [ -z "$FRP_TOKEN" ]; then
+        log_message "WARN" "serverAddr/token frpc belum diisi — frpc TIDAK dijalankan."
+        log_message "WARN" "Edit /etc/frp/frpc.toml lalu: systemctl restart frpc"
+        return 0
+    fi
+    systemctl restart frpc.service
+    sleep 1
+    if systemctl is-active --quiet frpc.service; then
+        log_message "INFO" "✓ frpc berjalan (WS remote:${FRP_WS_REMOTE_PORT}, gRPC remote:${FRP_GRPC_REMOTE_PORT})"
+    else
+        log_message "ERROR" "frpc gagal start. Cek: journalctl -u frpc -n 30"
+    fi
+}
+
 save_path_id() {
     # Simpan prefix supaya install ulang / tool lain bisa membacanya
     echo "$PATH_ID" > "$PATH_ID_FILE"
@@ -620,6 +787,14 @@ verify_installation() {
         all_ok=false
     fi
 
+    if [ "$FRP_SKIP" != "1" ]; then
+        if is_cmd_installed "frpc"; then
+            log_message "INFO" "✓ frpc terinstal."
+        else
+            log_message "WARN" "✗ frpc belum terinstal."
+        fi
+    fi
+
     if [ -f /root/protos/app/stats/command/command.proto ]; then
         log_message "INFO" "✓ Proto file untuk stats sudah ada."
     else
@@ -650,6 +825,7 @@ finalize_installation() {
     systemctl daemon-reload
     systemctl restart haproxy
     systemctl restart sing-box.service
+    start_frpc
 
     # Pastikan nvm + pm2 ke-source (installer jalan via setsid, non-login shell)
     export NVM_DIR="$HOME/.nvm"
@@ -680,6 +856,7 @@ finalize_installation() {
     log_message "INFO" "  VLESS  WS   : /${PATH_ID}/vless-ws     | gRPC: ${PATH_ID}-vless-grpc"
     log_message "INFO" "  Trojan WS   : /${PATH_ID}/trojan-ws    | gRPC: ${PATH_ID}-trojan-grpc"
     log_message "INFO" "  Port: WS=80, gRPC=8081 (tanpa TLS)"
+    [ "$FRP_SKIP" = "1" ] || log_message "INFO" "  frpc: /etc/frp/frpc.toml (systemctl restart frpc setelah edit)"
 }
 
 # --- [ EKSEKUSI UTAMA ] ---
@@ -694,6 +871,7 @@ main() {
 
     # Tanya prefix di awal supaya user tidak menunggu apt upgrade dulu
     ask_path_id
+    ask_frpc_config
 
     force_ipv4
     update_system
@@ -705,6 +883,7 @@ main() {
     install_haproxy
     write_singbox_config
     write_haproxy_config
+    install_frpc
     tune_system_performance
     install_nodejs
     setup_tools
