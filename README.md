@@ -3,7 +3,7 @@
 > **One-line installer** untuk **Sing-box + HAProxy** di VPS Ubuntu 22.04/24.04 — langsung jalan, lengkap dengan SSL Let's Encrypt, V2Ray API stats, dan Node.js management API.
 
 ```bash
-bash -c "$(curl -sL https://raw.githubusercontent.com/masjeho2/singbox-bot/refs/heads/main/install.sh)"
+bash -c "$(curl -sL https://raw.githubusercontent.com/masjeho2/singbox-bot/refs/heads/main/install-singbox.sh)"
 ```
 
 Jalankan sebagai `root`, tunggu 3–5 menit, server langsung siap dipake. Domain diminta interaktif (subdomain VPS lo), SSL auto-issue.
